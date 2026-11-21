@@ -17,6 +17,7 @@ use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 
 use crate::APP_ID;
 use crate::api::{ProxyStatus, SettingsChange, SiteStatus, Status};
+use crate::i18n::tr;
 use crate::model::AppModel;
 
 /// What the tray asks the app to do, on the main loop.
@@ -46,6 +47,8 @@ struct State {
     running: bool,
     /// The sites, each with its worktrees; problems are in the main window.
     sites: Vec<SiteItem>,
+    /// The Sites submenu is left out (General → Tray).
+    hide_sites: bool,
     /// The proxies (`flock proxy`), after the sites.
     proxies: Vec<SiteItem>,
     mail_count: u32,
@@ -71,6 +74,7 @@ impl State {
             warning: status.as_ref().and_then(|s| s.warnings.first().cloned()),
             needs_setup,
             sites: status.as_ref().map(SiteItem::all).unwrap_or_default(),
+            hide_sites: model.hides_sites(),
             proxies: status.as_ref().map(|s| s.proxies.iter().map(SiteItem::proxy).collect()).unwrap_or_default(),
             mail_count: status.as_ref().map_or(0, |s| s.mail_count),
             dump_count: status.as_ref().map_or(0, |s| s.dump_count),
@@ -117,7 +121,7 @@ impl SiteItem {
         let mut label = site.worktree_label();
         if let Some(setup) = &site.worktree {
             if !setup.database.is_empty() {
-                label.push_str(&format!(" · {}", if setup.db_mode.is_empty() { "own database" } else { setup.db_mode.as_str() }));
+                label.push_str(&format!(" · {}", setup.database_label()));
             }
             if setup.busy() || setup.failed() {
                 label.push_str(&format!(" · {}", setup.text()));
@@ -199,10 +203,10 @@ impl FlockTray {
             submenu.extend(self.state.proxies.iter().map(open));
         }
         if submenu.is_empty() {
-            submenu.push(text("No sites yet"));
+            submenu.push(text(tr!("menu.no_sites_yet")));
         }
-        submenu.extend([MenuItem::Separator, item("Manage Sites…", || Command::Open("settings/sites"))]);
-        SubMenu { label: "Sites".to_owned(), submenu, ..Default::default() }.into()
+        submenu.extend([MenuItem::Separator, item(tr!("menu.manage_sites"), || Command::Open("settings/sites"))]);
+        SubMenu { label: tr!("settings.pane.sites").to_owned(), submenu, ..Default::default() }.into()
     }
 }
 
@@ -248,31 +252,31 @@ impl ksni::Tray for FlockTray {
         items.push(MenuItem::Separator);
         // Before the setup there is nothing to open yet: Mail, Dumps, Logs and Settings all need the daemon.
         if self.state.needs_setup {
-            items.extend([item("Set Up Flock…", || Command::Open("setup")), MenuItem::Separator]);
+            items.extend([item(tr!("menu.set_up_flock"), || Command::Open("setup")), MenuItem::Separator]);
         } else {
-            items.extend([item("Open Flock", || Command::Show), MenuItem::Separator]);
-            if self.state.running {
+            items.extend([item(tr!("menu.open_flock"), || Command::Show), MenuItem::Separator]);
+            if self.state.running && !self.state.hide_sites {
                 items.push(self.sites());
             }
             items.extend([
-                item(&counted("Mail", self.state.mail_count), || Command::Open("mail")),
-                item(&counted("Dumps", self.state.dump_count), || Command::Open("dumps")),
-                item("Logs", || Command::Open("logs")),
+                item(&counted(tr!("services.category.mail"), self.state.mail_count), || Command::Open("mail")),
+                item(&counted(tr!("menu.dumps"), self.state.dump_count), || Command::Open("dumps")),
+                item(tr!("dumps.event_kind.logs"), || Command::Open("logs")),
                 MenuItem::Separator,
             ]);
             if self.state.running {
                 items.extend([
                     toggle("Xdebug", self.state.xdebug, |on| SettingsChange { xdebug: Some(on), ..Default::default() }),
-                    toggle("Capture Dumps", self.state.dumps, |on| SettingsChange { dumps: Some(on), ..Default::default() }),
+                    toggle(tr!("dumps.capture_dumps"), self.state.dumps, |on| SettingsChange { dumps: Some(on), ..Default::default() }),
                     MenuItem::Separator,
                 ]);
             }
             items.extend([
-                item("Settings…", || Command::Open("settings")),
-                item(if self.state.running { "Restart Flock" } else { "Start Flock" }, || Command::Restart),
+                item(tr!("menu.settings"), || Command::Open("settings")),
+                item(if self.state.running { tr!("menu.restart_flock") } else { tr!("menu.start_flock") }, || Command::Restart),
             ]);
         }
-        items.push(item("Quit Flock", || Command::Quit));
+        items.push(item(tr!("menu.quit_flock"), || Command::Quit));
         items
     }
 
@@ -375,5 +379,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(SiteItem::proxy(&started.proxies[0]).label, "admin.test · Starting…");
+    }
+
+    /// The labels of the menu's submenus.
+    fn submenus(hide_sites: bool) -> Vec<String> {
+        let state = State {
+            icon: "",
+            headline: "Running".to_owned(),
+            warning: None,
+            needs_setup: false,
+            running: true,
+            sites: vec![SiteItem { label: "acme.test".to_owned(), url: None, worktrees: Vec::new() }],
+            hide_sites,
+            proxies: Vec::new(),
+            mail_count: 0,
+            dump_count: 0,
+            xdebug: false,
+            dumps: false,
+        };
+        let tray = FlockTray { state, icon_theme_path: String::new(), sender: async_channel::unbounded().0 };
+        ksni::Tray::menu(&tray)
+            .into_iter()
+            .filter_map(|item| match item {
+                MenuItem::SubMenu(submenu) => Some(submenu.label),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hides_the_sites_submenu_when_asked() {
+        assert_eq!(submenus(false), ["Sites"]);
+        assert!(submenus(true).is_empty());
     }
 }
